@@ -14,6 +14,30 @@ variables:
   ZIP_NAME: 'app_$(Build.BuildId).zip'
   SSH_KEY: '/home/vboxuser/.ssh/id_rsa'   # explicit key (quick fix)
 
+# DEBUG STEP: show agent user, ssh key, and run verbose ssh/scp
+- script: |
+    echo "===== DEBUG: whoami & env ====="
+    whoami
+    id
+    echo "HOME: $HOME"
+    echo "PWD: $(pwd)"
+    echo "Listing agent ssh dir (if exists):"
+    ls -la /home/vboxuser/.ssh || true
+    stat -c "%U %G %a %n" /home/vboxuser/.ssh 2>/dev/null || true
+    stat -c "%U %G %a %n" /home/vboxuser/.ssh/id_rsa 2>/dev/null || true
+
+    echo "===== DEBUG: try ssh -vvv (explicit key) ====="
+    ssh -vvv -i /home/vboxuser/.ssh/id_rsa -o StrictHostKeyChecking=no devops@192.168.1.10 "echo REMOTE_OK" || echo "SSH-EXIT:$?"
+
+    echo "===== DEBUG: try scp -vvv (explicit key) ====="
+    # create a tiny test file to copy
+    echo "test" > /tmp/pipeline_ssh_test.txt
+    scp -vvv -i /home/vboxuser/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/pipeline_ssh_test.txt devops@192.168.1.10:/tmp/pipeline_ssh_test.txt || echo "SCP-EXIT:$?"
+
+    echo "===== DEBUG END ====="
+  displayName: 'DEBUG: check SSH key, user & connectivity'
+
+
 steps:
 # ensure basic tools (ok if run as root or vboxuser with sudo)
 - script: |
