@@ -14,53 +14,25 @@ variables:
   ZIP_NAME: 'app_$(Build.BuildId).zip'
   SSH_KEY: '/home/vboxuser/.ssh/id_rsa'   # explicit key (quick fix)
 
-# DEBUG STEP: show agent user, ssh key, and run verbose ssh/scp
-- script: |
-    echo "===== DEBUG: whoami & env ====="
-    whoami
-    id
-    echo "HOME: $HOME"
-    echo "PWD: $(pwd)"
-    echo "Listing agent ssh dir (if exists):"
-    ls -la /home/vboxuser/.ssh || true
-    stat -c "%U %G %a %n" /home/vboxuser/.ssh 2>/dev/null || true
-    stat -c "%U %G %a %n" /home/vboxuser/.ssh/id_rsa 2>/dev/null || true
-
-    echo "===== DEBUG: try ssh -vvv (explicit key) ====="
-    ssh -vvv -i /home/vboxuser/.ssh/id_rsa -o StrictHostKeyChecking=no devops@192.168.1.10 "echo REMOTE_OK" || echo "SSH-EXIT:$?"
-
-    echo "===== DEBUG: try scp -vvv (explicit key) ====="
-    # create a tiny test file to copy
-    echo "test" > /tmp/pipeline_ssh_test.txt
-    scp -vvv -i /home/vboxuser/.ssh/id_rsa -o StrictHostKeyChecking=no /tmp/pipeline_ssh_test.txt devops@192.168.1.10:/tmp/pipeline_ssh_test.txt || echo "SCP-EXIT:$?"
-
-    echo "===== DEBUG END ====="
-  displayName: 'DEBUG: check SSH key, user & connectivity'
-
-
 steps:
-# ensure basic tools (ok if run as root or vboxuser with sudo)
 - script: |
     sudo apt-get update -y || true
     sudo apt-get install -y zip unzip openssh-client || true
     echo "Agent tools ready"
   displayName: 'Ensure tools on agent'
 
-# Install dependencies (if you want to run npm install on agent side)
 - script: |
     if [ -f package.json ]; then
       npm install --no-optional || true
     fi
   displayName: 'Install dependencies (agent)'
 
-# run-tests BEFORE deploy (this must show fail then fix)
 - script: |
     echo "==> Running tests on agent"
     node test.js
   displayName: 'run-tests'
   continueOnError: false
 
-# Create artifact (zip)
 - script: |
     echo "==> Creating artifact zip"
     mkdir -p $(Build.ArtifactStagingDirectory)
@@ -68,7 +40,6 @@ steps:
     ls -lh "$(Build.ArtifactStagingDirectory)" || true
   displayName: 'Create artifact archive (zip)'
 
-# Deploy by copying zip and executing remote commands (single-line ssh)
 - script: |
     echo "==> Copying artifact to ${TARGET_USER}@${TARGET_HOST}"
     scp -i ${SSH_KEY} -o StrictHostKeyChecking=no "$(Build.ArtifactStagingDirectory)/$(ZIP_NAME)" ${TARGET_USER}@${TARGET_HOST}:/tmp/$(ZIP_NAME)
@@ -98,7 +69,6 @@ steps:
     "
   displayName: 'Deploy to target via SSH'
 
-# Rollback: run only if previous step failed
 - script: |
     echo "==> Rollback triggered: restoring last backup"
     ssh -i ${SSH_KEY} -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} "\
