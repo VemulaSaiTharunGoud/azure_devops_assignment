@@ -1,0 +1,66 @@
+trigger:
+  - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - task: NodeTool@0
+    inputs:
+      versionSpec: '18.x'
+    displayName: 'Install Node.js'
+
+  - script: |
+      npm install
+    displayName: 'Install dependencies'
+
+  - script: |
+      echo "Running build step..."
+    displayName: 'Build Step'
+
+  - script: |
+      echo "Running tests..."
+      node test.js
+    displayName: "run-tests"
+    continueOnError: false
+
+  # If tests fail, pipeline stops. You must fix test later.
+
+  - task: ArchiveFiles@2
+    inputs:
+      rootFolderOrFile: '$(Build.SourcesDirectory)'
+      archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
+      includeRootFolder: false
+
+  - publish: '$(Build.ArtifactStagingDirectory)/app.zip'
+    displayName: "Publish Artifacts"
+    artifact: app
+
+  # -------- DEPLOYMENT --------
+  - task: ExtractFiles@1
+    inputs:
+      archiveFilePatterns: '$(Pipeline.Workspace)/app/app.zip'
+      destinationFolder: '$(Pipeline.Workspace)/app-extracted'
+
+  - script: |
+      echo "Starting deployment..."
+      scp -o StrictHostKeyChecking=no -r $(Pipeline.Workspace)/app-extracted/* devops@YOUR_VM_IP:/var/www/app/
+
+      ssh -o StrictHostKeyChecking=no devops@YOUR_VM_IP << 'EOF'
+        cd /var/www/app
+        npm install
+        
+        # Start server
+        pm2 stop app || true
+        pm2 start index.js --name app
+
+        echo "Deployment completed"
+      EOF
+    displayName: "Deploy to Linux VM"
+
+  # -------- ROLLBACK LOGIC --------
+  - script: |
+      echo "If deployment fails, rollback triggered"
+      # rollback is simple - keep last successful artifact copy
+    displayName: "Rollback Logic (Info)"
+    condition: failed()
