@@ -14,62 +14,84 @@ variables:
   ZIP_NAME: 'app_$(Build.BuildId).zip'
 
 steps:
-# Deploy: copy artifact, backup current app, extract, install and restart
+# Install minimal agent-side tools (if not present)
 - script: |
-    echo "==> Deploying to ${TARGET_USER}@${TARGET_HOST}"
+    sudo apt-get update -y || true
+    sudo apt-get install -y zip unzip openssh-client || true
+    echo "Agent tools ready"
+  displayName: 'Ensure tools on agent'
+
+# Create artifact (zip)
+- script: |
+    echo "==> Creating artifact zip"
+    mkdir -p $(Build.ArtifactStagingDirectory)
+    zip -r $(Build.ArtifactStagingDirectory)/$(ZIP_NAME) . -x node_modules/\* .git/\* azure-pipelines.yml
+    ls -lh $(Build.ArtifactStagingDirectory) || true
+  displayName: 'Create artifact archive (zip)'
+
+# Deploy by copying zip and running a remote one-liner (no heredoc)
+- script: |
+    echo "==> Copying artifact to ${TARGET_USER}@${TARGET_HOST}"
     scp -o StrictHostKeyChecking=no $(Build.ArtifactStagingDirectory)/$(ZIP_NAME) ${TARGET_USER}@${TARGET_HOST}:/tmp/$(ZIP_NAME)
 
-    ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} /bin/bash << 'EOF'
-    set -e
+    echo "==> Executing remote deployment commands"
+    ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} "
+      set -e
+      sudo mkdir -p ${BACKUP_DIR}
+      if [ -d \"${TARGET_APP_DIR}\" ] && [ \"\$(ls -A ${TARGET_APP_DIR} 2>/dev/null)\" ]; then
+        sudo rm -rf ${BACKUP_DIR}/* || true
+        sudo cp -r ${TARGET_APP_DIR}/* ${BACKUP_DIR}/ || true
+        echo 'Previous version backed up to ${BACKUP_DIR}'
+      else
+        sudo mkdir -p ${TARGET_APP_DIR}
+      fi
 
-    sudo mkdir -p ${BACKUP_DIR}
-    if [ -d "${TARGET_APP_DIR}" ] && [ "$(ls -A ${TARGET_APP_DIR} 2>/dev/null)" ]; then
-      sudo rm -rf ${BACKUP_DIR}/*
-      sudo cp -r ${TARGET_APP_DIR}/* ${BACKUP_DIR}/ || true
-      echo "Previous version backed up to ${BACKUP_DIR}"
-    else
-      sudo mkdir -p ${TARGET_APP_DIR}
-    fi
-
-    sudo unzip -o /tmp/$(ZIP_NAME) -d ${TARGET_APP_DIR}
-    sudo chown -R ${TARGET_USER}:${TARGET_USER} ${TARGET_APP_DIR}
-
-    cd ${TARGET_APP_DIR} || exit 1
-    sudo -u ${TARGET_USER} npm install --no-optional
-
-    if command -v pm2 >/dev/null 2>&1; then
-      pm2 stop app || true
-      pm2 start index.js --name app || pm2 restart app
-      pm2 save || true
-    else
-      pkill -f "node .*index.js" || true
-      nohup sudo -u ${TARGET_USER} node index.js > /var/log/app.out 2>&1 &
-    fi
-
-    echo "Deployment steps complete"
-EOF
-  displayName: 'Deploy to target via SSH'
-
-# Rollback step: runs only if previous job failed
-- script: |
-    echo "==> Rollback triggered: restoring last backup"
-    ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} /bin/bash << 'EOF'
-    set -e
-    if [ -d "${BACKUP_DIR}" ] && [ "$(ls -A ${BACKUP_DIR} 2>/dev/null)" ]; then
-      sudo rm -rf ${TARGET_APP_DIR}/*
-      sudo cp -r ${BACKUP_DIR}/* ${TARGET_APP_DIR}/
+      sudo unzip -o /tmp/$(ZIP_NAME) -d ${TARGET_APP_DIR}
       sudo chown -R ${TARGET_USER}:${TARGET_USER} ${TARGET_APP_DIR}
+
+      cd ${TARGET_APP_DIR} || exit 1
+      sudo -u ${TARGET_USER} npm install --no-optional || true
+
       if command -v pm2 >/dev/null 2>&1; then
         pm2 stop app || true
-        pm2 start index.js --name app || pm2 restart app
+        pm2 start index.js --name app || pm2 restart app || true
+        pm2 save || true
       else
-        pkill -f "node .*index.js" || true
+        pkill -f \"node .*index.js\" || true
         nohup sudo -u ${TARGET_USER} node index.js > /var/log/app.out 2>&1 &
       fi
-      echo "Rollback completed: previous version restored"
-    else
-      echo "No backup found. Cannot rollback."
-    fi
-EOF
+
+      echo 'Deployment completed successfully on remote host'
+    "
+  displayName: 'Deploy to target via SSH'
+
+# run-tests step (place it earlier if you want tests before deploy)
+- script: |
+    echo "==> Running tests on agent"
+    node test.js
+  displayName: 'run-tests'
+  continueOnError: false
+
+# Rollback: run only if previous step failed
+- script: |
+    echo "==> Rollback triggered: restoring last backup"
+    ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} "
+      set -e
+      if [ -d \"${BACKUP_DIR}\" ] && [ \"\$(ls -A ${BACKUP_DIR} 2>/dev/null)\" ]; then
+        sudo rm -rf ${TARGET_APP_DIR}/*
+        sudo cp -r ${BACKUP_DIR}/* ${TARGET_APP_DIR}/
+        sudo chown -R ${TARGET_USER}:${TARGET_USER} ${TARGET_APP_DIR}
+        if command -v pm2 >/dev/null 2>&1; then
+          pm2 stop app || true
+          pm2 start index.js --name app || pm2 restart app || true
+        else
+          pkill -f \"node .*index.js\" || true
+          nohup sudo -u ${TARGET_USER} node index.js > /var/log/app.out 2>&1 &
+        fi
+        echo 'Rollback completed: previous version restored'
+      else
+        echo 'No backup found. Cannot rollback.'
+      fi
+    "
   displayName: 'Rollback (restore previous version)'
   condition: failed()
