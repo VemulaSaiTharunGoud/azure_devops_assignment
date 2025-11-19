@@ -44,9 +44,9 @@ steps:
 
   - script: |
       echo "Starting deployment..."
-      scp -o StrictHostKeyChecking=no -r $(Pipeline.Workspace)/app-extracted/* devops@YOUR_VM_IP:/var/www/app/
+      scp -o StrictHostKeyChecking=no -r $(Pipeline.Workspace)/app-extracted/* devops@192.168.1.10:/var/www/app/
 
-      ssh -o StrictHostKeyChecking=no devops@YOUR_VM_IP << 'EOF'
+      ssh -o StrictHostKeyChecking=no devops@192.168.1.10 << 'EOF'
         cd /var/www/app
         npm install
         
