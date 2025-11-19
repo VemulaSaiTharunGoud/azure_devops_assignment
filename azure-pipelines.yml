@@ -2,7 +2,9 @@ trigger:
   - main
 
 pool:
-  vmImage: ubuntu-latest
+  name: 'self-hosted'
+  demands:
+    - agent.os -equals Linux
 
 steps:
   - task: NodeTool@0
