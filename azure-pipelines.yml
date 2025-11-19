@@ -6,63 +6,106 @@ pool:
   demands:
     - agent.os -equals Linux
 
+variables:
+  TARGET_USER: 'devops'
+  TARGET_HOST: '192.168.1.10'     # <-- CHANGE to your deployment VM IP
+  TARGET_APP_DIR: '/var/www/app'
+  BACKUP_DIR: '/var/www/artifacts/last'
+  ZIP_NAME: 'app_$(Build.BuildId).zip'
+
 steps:
-  - task: NodeTool@0
-    inputs:
-      versionSpec: '18.x'
-    displayName: 'Install Node.js'
+# Install Node.js on the agent (script avoids NodeTool@0)
+- script: |
+    echo "==> Install Node.js 18.x (NodeSource)"
+    sudo apt-get update -y
+    curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+    sudo apt-get install -y nodejs build-essential zip unzip openssh-client
+    node -v || true
+    npm -v || true
+  displayName: 'Install Node.js on agent (script)'
 
-  - script: |
-      npm install
-    displayName: 'Install dependencies'
+# Install dependencies
+- script: |
+    echo "==> Install npm dependencies"
+    npm install --no-optional
+  displayName: 'Install dependencies'
 
-  - script: |
-      echo "Running build step..."
-    displayName: 'Build Step'
+- script: |
+    echo "==> Build step (no-op for simple app)"
+    ls -la
+  displayName: 'Build Step'
 
-  - script: |
-      echo "Running tests..."
-      node test.js
-    displayName: "run-tests"
-    continueOnError: false
+# Tests (initially will fail so show both fail & fix)
+- script: |
+    echo "==> Running tests"
+    node test.js
+  displayName: 'run-tests'
+  continueOnError: false
 
-  # If tests fail, pipeline stops. You must fix test later.
+# Create a zip artifact
+- script: |
+    echo "==> Create artifact zip"
+    mkdir -p $(Build.ArtifactStagingDirectory)
+    zip -r $(Build.ArtifactStagingDirectory)/$(ZIP_NAME) . -x node_modules/\* .git/\* azure-pipelines.yml
+    ls -lh $(Build.ArtifactStagingDirectory) || true
+  displayName: 'Create artifact archive (zip)'
 
-  - task: ArchiveFiles@2
-    inputs:
-      rootFolderOrFile: '$(Build.SourcesDirectory)'
-      archiveFile: '$(Build.ArtifactStagingDirectory)/app.zip'
-      includeRootFolder: false
+# Deploy: copy artifact, backup current app, extract, install and restart
+- script: |
+    echo "==> Deploying to ${TARGET_USER}@${TARGET_HOST}"
+    scp -o StrictHostKeyChecking=no $(Build.ArtifactStagingDirectory)/$(ZIP_NAME) ${TARGET_USER}@${TARGET_HOST}:/tmp/$(ZIP_NAME)
 
-  - publish: '$(Build.ArtifactStagingDirectory)/app.zip'
-    displayName: "Publish Artifacts"
-    artifact: app
+    ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} /bin/bash << 'REMOTE'
+      set -e
 
-  # -------- DEPLOYMENT --------
-  - task: ExtractFiles@1
-    inputs:
-      archiveFilePatterns: '$(Pipeline.Workspace)/app/app.zip'
-      destinationFolder: '$(Pipeline.Workspace)/app-extracted'
+      sudo mkdir -p ${BACKUP_DIR}
+      if [ -d "${TARGET_APP_DIR}" ] && [ "$(ls -A ${TARGET_APP_DIR} 2>/dev/null)" ]; then
+        sudo rm -rf ${BACKUP_DIR}/*
+        sudo cp -r ${TARGET_APP_DIR}/* ${BACKUP_DIR}/ || true
+        echo "Previous version backed up to ${BACKUP_DIR}"
+      else
+        sudo mkdir -p ${TARGET_APP_DIR}
+      fi
 
-  - script: |
-      echo "Starting deployment..."
-      scp -o StrictHostKeyChecking=no -r $(Pipeline.Workspace)/app-extracted/* devops@192.168.1.10:/var/www/app/
+      sudo unzip -o /tmp/$(ZIP_NAME) -d ${TARGET_APP_DIR}
+      sudo chown -R ${TARGET_USER}:${TARGET_USER} ${TARGET_APP_DIR}
 
-      ssh -o StrictHostKeyChecking=no devops@192.168.1.10 << 'EOF'
-        cd /var/www/app
-        npm install
-        
-        # Start server
+      cd ${TARGET_APP_DIR} || exit 1
+      sudo -u ${TARGET_USER} npm install --no-optional
+
+      if command -v pm2 >/dev/null 2>&1; then
         pm2 stop app || true
-        pm2 start index.js --name app
+        pm2 start index.js --name app || pm2 restart app
+        pm2 save || true
+      else
+        pkill -f "node .*index.js" || true
+        nohup sudo -u ${TARGET_USER} node index.js > /var/log/app.out 2>&1 &
+      fi
 
-        echo "Deployment completed"
-      EOF
-    displayName: "Deploy to Linux VM"
+      echo "Deployment steps complete"
+REMOTE
+  displayName: 'Deploy to target via SSH'
 
-  # -------- ROLLBACK LOGIC --------
-  - script: |
-      echo "If deployment fails, rollback triggered"
-      # rollback is simple - keep last successful artifact copy
-    displayName: "Rollback Logic (Info)"
-    condition: failed()
+# Rollback step: runs only if previous job failed
+- script: |
+    echo "==> Rollback triggered: restoring last backup"
+    ssh -o StrictHostKeyChecking=no ${TARGET_USER}@${TARGET_HOST} /bin/bash << 'EOF'
+      set -e
+      if [ -d "${BACKUP_DIR}" ] && [ "$(ls -A ${BACKUP_DIR} 2>/dev/null)" ]; then
+        sudo rm -rf ${TARGET_APP_DIR}/*
+        sudo cp -r ${BACKUP_DIR}/* ${TARGET_APP_DIR}/
+        sudo chown -R ${TARGET_USER}:${TARGET_USER} ${TARGET_APP_DIR}
+        if command -v pm2 >/dev/null 2>&1; then
+          pm2 stop app || true
+          pm2 start index.js --name app || pm2 restart app
+        else
+          pkill -f "node .*index.js" || true
+          nohup sudo -u ${TARGET_USER} node index.js > /var/log/app.out 2>&1 &
+        fi
+        echo "Rollback completed: previous version restored"
+      else
+        echo "No backup found. Cannot rollback."
+      fi
+EOF
+  displayName: 'Rollback (restore previous version)'
+  condition: failed()
